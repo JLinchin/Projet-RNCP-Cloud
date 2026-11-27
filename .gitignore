@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+coverage/
+# Terraform
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+infra/terraform/.generated/
+infra/terraform/.terraform.lock.hcl.bak
+*.tfvars
+!*.tfvars.example

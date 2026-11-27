@@ -1,0 +1,6 @@
+# Contrôle d'accès au code source (ISO 27001 A.8.4) : toute modification de l'infrastructure,
+# du pipeline ou des charts exige la revue d'un membre de l'équipe plateforme.
+*                    @equipe-biblio/devs
+/infra/              @equipe-biblio/plateforme
+/helm/               @equipe-biblio/plateforme
+/.github/            @equipe-biblio/plateforme

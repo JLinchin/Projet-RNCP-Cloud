@@ -1,0 +1,7 @@
+# Environnement de production : haute disponibilité (2 réplicas minimum + PDB) et autoscaling.
+host: library.localhost
+backend:
+  hpa: { enabled: true, minReplicas: 2, maxReplicas: 6, targetCPU: 70 }
+  pdb: { minAvailable: 1 }
+frontend:
+  replicas: 2

@@ -1,0 +1,67 @@
+image:
+  registry: localhost:5001        # registre local connecté au cluster kind (créé par Terraform)
+  tag: latest                     # remplacé par le SHA du commit dans le pipeline CI/CD
+  pullPolicy: IfNotPresent
+
+host: library.localhost
+tlsSecret: library-tls
+ingressClassName: traefik
+ingressNamespace: ingress
+monitoringNamespace: monitoring
+
+secrets:
+  app: library-app               # JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD
+  postgres: library-postgres     # APP_DB_PASSWORD
+  rabbitmq: library-rabbitmq     # RABBITMQ_USER, RABBITMQ_PASSWORD
+  s3App: library-s3-app          # S3_ACCESS_KEY, S3_SECRET_KEY
+
+config:
+  LOG_LEVEL: info
+  LOAN_DAYS: "21"
+  JWT_TTL: 2h
+  RETENTION_DAYS: "365"
+  PGHOST: postgres
+  PGDATABASE: library
+  PGUSER: library_app
+  RABBITMQ_HOST: rabbitmq
+  S3_ENDPOINT: minio
+  S3_PORT: "9000"
+
+backend:
+  replicas: 2
+  # Right-sizing (cf. docs/FINOPS.md) : requests proches de la consommation p95 observée dans Grafana
+  # (panneau « CPU : consommé vs réservé »), limits larges pour absorber les pics.
+  # Valeurs initiales v0 : 250m / 256Mi et 3 réplicas fixes.
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPU: 70
+  pdb:
+    minAvailable: 1
+
+# Canary « par réplicas » : des pods de la nouvelle version rejoignent le même Service ;
+# la part de trafic ≈ canary.replicas / (stable + canary). Indépendant du contrôleur Ingress.
+canary:
+  enabled: false
+  tag: ""
+  replicas: 1
+
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 192Mi }
+
+frontend:
+  replicas: 2
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+
+slo:
+  availability: 0.995        # 99,5 % de requêtes non-5xx sur 30 jours
+  latencySeconds: 0.3        # 95 % des requêtes servies en moins de 300 ms

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: library-data
+description: Couche données de la bibliothèque — PostgreSQL, RabbitMQ, stockage objet MinIO, sauvegardes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

@@ -1,0 +1,19 @@
+{
+  "name": "biblio-frontend",
+  "version": "1.0.0",
+  "description": "SPA de la bibliothèque (Vite, JavaScript natif) servie par nginx",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.0",
+    "globals": "^17.0.0",
+    "vite": "^6.3.5"
+  }
+}

@@ -1,0 +1,47 @@
+{{- $traefikCRD := .Capabilities.APIVersions.Has "traefik.io/v1alpha1" }}
+{{- if $traefikCRD }}
+# En-têtes de sécurité HTTP posés en bordure (HSTS : force HTTPS côté navigateur).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    contentTypeNosniff: true
+    frameDeny: true
+    referrerPolicy: strict-origin-when-cross-origin
+---
+{{- end }}
+# Chiffrement en transit (ISO 27001 A.8.24) : routeur exposé uniquement sur l'entrée HTTPS
+# (websecure), certificat TLS fourni par Terraform. Aucun service n'est publié en HTTP clair.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: library
+  labels: {{- include "library.labels" . | nindent 4 }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    {{- if $traefikCRD }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-security-headers@kubernetescrd
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingressClassName }}
+  tls:
+    - hosts: [{{ .Values.host | quote }}]
+      secretName: {{ .Values.tlsSecret }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: backend, port: { name: http } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frontend, port: { name: http } }

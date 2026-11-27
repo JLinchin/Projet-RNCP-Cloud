@@ -1,0 +1,158 @@
+# Pipeline CI/CD — sur chaque push : lint, tests, analyse de sécurité, build et scan des images ;
+# sur main : build + push vers le registre local, déploiement dev, puis prod (canary) après approbation.
+#
+# Les jobs de déploiement tournent sur un runner auto-hébergé installé sur la machine qui héberge
+# le cluster kind (labels : self-hosted, linux, kind) : le cluster reste 100 % local.
+name: CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: localhost:5001
+  HELM_DRIVER: configmap # le compte CI n'a aucun droit sur les Secrets Kubernetes
+
+jobs:
+  # ------------------------------------------------------------------ CI
+  test:
+    name: Lint & tests (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, worker, frontend]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.component }}/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - name: Audit des dépendances (vulnérabilités connues)
+        run: npm audit --omit=dev --audit-level=high
+
+  iac:
+    name: IaC & sécurité du dépôt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform fmt / validate
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - uses: azure/setup-helm@v4
+      - name: Helm lint
+        run: |
+          helm lint helm/library-data
+          helm lint helm/library -f helm/library/values-prod.yaml
+          helm template library helm/library -f helm/library/values-prod.yaml --set canary.enabled=true --set canary.tag=test > /dev/null
+      - name: Recherche de secrets commités (bloquant)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: "1"
+      - name: Analyse de configuration IaC / Kubernetes (rapport)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+  build:
+    name: Build & scan image (${{ matrix.component }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, worker, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.component }}
+          load: true
+          tags: biblio-${{ matrix.component }}:${{ github.sha }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+      - name: Scan de vulnérabilités de l'image (bloquant sur CRITICAL corrigeables)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: biblio-${{ matrix.component }}:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Taille de l'image (suivi FinOps)
+        run: |
+          SIZE=$(docker image inspect "biblio-${{ matrix.component }}:${{ github.sha }}" --format '{{.Size}}')
+          echo "${{ matrix.component }} : $((SIZE / 1024 / 1024)) Mo" >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ CD
+  deploy-dev:
+    name: Déploiement dev
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, iac]
+    runs-on: [self-hosted, linux, kind]
+    environment:
+      name: dev
+      url: https://dev.library.localhost
+    concurrency: deploy-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contexte
+        run: |
+          echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          printf '%s' "${{ secrets.KUBECONFIG_DEV }}" > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: Build & push vers le registre local
+        run: scripts/build-push.sh "$TAG"
+      - name: Déploiement (rolling update, rollback automatique si échec)
+        run: |
+          helm upgrade --install library helm/library -n library-dev \
+            -f helm/library/values-dev.yaml --set image.tag="$TAG" \
+            --atomic --wait --timeout 5m
+      - name: Tests de fumée
+        env:
+          CA_CERT: ${{ vars.CA_CERT_PATH }}
+        run: scripts/smoke-test.sh https://dev.library.localhost "$TAG"
+
+  deploy-prod:
+    name: Déploiement prod (canary)
+    needs: deploy-dev
+    runs-on: [self-hosted, linux, kind]
+    environment:
+      name: production # règle de protection : approbation manuelle requise
+      url: https://library.localhost
+    concurrency: deploy-prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contexte
+        run: |
+          echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          printf '%s' "${{ secrets.KUBECONFIG_PROD }}" > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: Canary puis promotion (ou annulation automatique)
+        env:
+          CA_CERT: ${{ vars.CA_CERT_PATH }}
+        run: scripts/canary.sh library-prod "$TAG" helm/library/values-prod.yaml https://library.localhost

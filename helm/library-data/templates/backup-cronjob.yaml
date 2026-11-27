@@ -1,0 +1,80 @@
+{{- if .Values.backup.enabled }}
+# Sauvegarde quotidienne de PostgreSQL vers le stockage objet (ISO 27001 A.8.13).
+#  1. initContainer : pg_dump au format « custom » (compressé) dans un volume temporaire ;
+#  2. conteneur mc : dépôt dans le bucket « backups » avec un compte qui ne peut QUE déposer
+#     (pas de suppression possible -> protection contre l'effacement / rançongiciel).
+# Les objets sont chiffrés (SSE-S3) et expirent automatiquement après {{ .Values.backup.retentionDays }} jours.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  labels: {{- include "data.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: postgres-backup
+            biblio/db-access: "true"
+            biblio/s3-access: "true"
+            {{- include "data.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: dump
+              image: {{ .Values.postgres.image }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - pg_dump -Fc -Z 6 -h postgres -U "$PGUSER" -d "$PGDATABASE" -f "/backup/library-$(date -u +%Y%m%dT%H%M%SZ).dump" && ls -l /backup
+              env:
+                - { name: PGUSER, value: {{ .Values.postgres.appUser }} }
+                - { name: PGDATABASE, value: {{ .Values.postgres.database }} }
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: {{ .Values.secrets.postgres }}, key: APP_DB_PASSWORD } }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext: {{- include "data.containerSecurity" . | nindent 16 }}
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+          containers:
+            - name: upload
+              image: {{ .Values.minio.mcImage }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - >-
+                  mc alias set s3 http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" &&
+                  mc cp /backup/*.dump s3/backups/postgres/ &&
+                  echo "sauvegarde déposée"
+              env:
+                - { name: MC_CONFIG_DIR, value: /tmp/.mc }
+                - name: S3_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: {{ .Values.secrets.s3Backup }}, key: S3_ACCESS_KEY } }
+                - name: S3_SECRET_KEY
+                  valueFrom: { secretKeyRef: { name: {{ .Values.secrets.s3Backup }}, key: S3_SECRET_KEY } }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              securityContext: {{- include "data.containerSecurity" . | nindent 16 }}
+              volumeMounts:
+                - { name: backup, mountPath: /backup, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: backup
+              emptyDir: { sizeLimit: 1Gi }
+            - name: tmp
+              emptyDir: {}
+{{- end }}

@@ -1,0 +1,8 @@
+# Dockerfile « naïf » conservé UNIQUEMENT comme point de comparaison FinOps
+# (scripts/measure-images.sh). Image Debian complète, devDependencies incluses,
+# exécution en root, pas de multi-stage. NE PAS UTILISER EN PRODUCTION.
+FROM node:22
+WORKDIR /app
+COPY . .
+RUN npm install
+CMD ["npm", "start"]

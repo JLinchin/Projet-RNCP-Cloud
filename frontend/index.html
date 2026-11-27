@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bibliothèque</title>
+  </head>
+  <body>
+    <header>
+      <h1>📚 Bibliothèque</h1>
+      <div id="session"></div>
+    </header>
+    <main>
+      <section id="auth" class="card"></section>
+      <section id="admin" class="card" hidden></section>
+      <section class="card">
+        <div class="row">
+          <h2>Catalogue</h2>
+          <input id="search" type="search" placeholder="Rechercher un titre ou un auteur" aria-label="Rechercher" />
+        </div>
+        <div id="books" class="grid"></div>
+      </section>
+      <section id="loans" class="card" hidden></section>
+    </main>
+    <footer id="version"></footer>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

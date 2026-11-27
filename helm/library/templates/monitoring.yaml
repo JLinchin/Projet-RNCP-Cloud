@@ -1,0 +1,115 @@
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+{{- $ns := .Release.Namespace }}
+{{- $errBudget := subf 1.0 .Values.slo.availability }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: backend }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: worker
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: worker }
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+# SLI / SLO et alertes (ISO 27001 A.8.16 activités de surveillance).
+#  SLO disponibilité : {{ mulf .Values.slo.availability 100 }} % des requêtes API sans erreur 5xx (fenêtre 30 j)
+#  SLO latence       : 95 % des requêtes API servies en moins de {{ .Values.slo.latencySeconds }} s
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: library-slo
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: library-sli.rules
+      interval: 30s
+      rules:
+        - record: sli:api_requests:rate5m
+          expr: sum by (namespace) (rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched"}[5m]))
+        - record: sli:api_errors:rate5m
+          expr: sum by (namespace) (rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched", status_code=~"5.."}[5m]))
+        - record: sli:api_availability:ratio_rate5m
+          expr: 1 - (sli:api_errors:rate5m{namespace="{{ $ns }}"} / clamp_min(sli:api_requests:rate5m{namespace="{{ $ns }}"}, 1e-9))
+        - record: sli:api_latency_p95:5m
+          expr: histogram_quantile(0.95, sum by (namespace, le) (rate(http_request_duration_seconds_bucket{namespace="{{ $ns }}", route!="unmatched"}[5m])))
+        - record: sli:api_fast_requests:ratio_rate5m
+          expr: |
+            sum by (namespace) (rate(http_request_duration_seconds_bucket{namespace="{{ $ns }}", route!="unmatched", le="{{ .Values.slo.latencySeconds }}"}[5m]))
+            / clamp_min(sum by (namespace) (rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched"}[5m])), 1e-9)
+    - name: library-alerts
+      rules:
+        # Alerte « burn rate » multi-fenêtres (méthode Google SRE) : le budget d'erreur
+        # mensuel serait consommé en ~2 jours au rythme actuel.
+        - alert: ApiErrorBudgetBurnFast
+          expr: |
+            (
+              sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched", status_code=~"5.."}[1h]))
+              / clamp_min(sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched"}[1h])), 1e-9)
+            ) > (14.4 * {{ $errBudget }})
+            and
+            (
+              sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched", status_code=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}", route!="unmatched"}[5m])), 1e-9)
+            ) > (14.4 * {{ $errBudget }})
+          for: 2m
+          labels: { severity: critical, slo: availability }
+          annotations:
+            summary: "API {{ $ns }} : budget d'erreur consommé trop vite"
+            description: "Le taux d'erreurs 5xx dépasse 14,4x le budget du SLO de disponibilité."
+        - alert: ApiLatencyP95High
+          expr: sli:api_latency_p95:5m{namespace="{{ $ns }}"} > {{ .Values.slo.latencySeconds }}
+          for: 10m
+          labels: { severity: warning, slo: latency }
+          annotations:
+            summary: "API {{ $ns }} : latence p95 supérieure à {{ .Values.slo.latencySeconds }} s"
+        - alert: BackendUnavailable
+          expr: sum(up{namespace="{{ $ns }}", service="backend"}) == 0 or absent(up{namespace="{{ $ns }}", service="backend"})
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "Aucun pod back-end joignable dans {{ $ns }}"
+        - alert: WorkerJobsDeadLettered
+          expr: sum(increase(jobs_processed_total{namespace="{{ $ns }}", status="dead_letter"}[15m])) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "Des jobs asynchrones ont échoué définitivement (DLQ) dans {{ $ns }}"
+        - alert: JobQueueBacklog
+          expr: sum(rabbitmq_queue_messages_ready{namespace="{{ $ns }}", queue="library.jobs"}) > 100
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "File library.jobs en retard de traitement ({{ "{{" }} $value {{ "}}" }} messages)"
+        - alert: AuthBruteForceSuspected
+          expr: sum(increase(auth_events_total{namespace="{{ $ns }}", event="login", result=~"failure|rate_limited"}[5m])) > 20
+          labels: { severity: warning, category: security }
+          annotations:
+            summary: "Nombreux échecs de connexion dans {{ $ns }} (force brute ?)"
+            description: "Consulter les logs de sécurité dans Grafana/Loki : {namespace=\"{{ $ns }}\"} | json | category=\"security\""
+        - alert: DatabaseBackupMissing
+          expr: (time() - max(kube_cronjob_status_last_successful_time{namespace="{{ $ns }}", cronjob="postgres-backup"})) > 26 * 3600
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Aucune sauvegarde PostgreSQL réussie depuis plus de 26 h dans {{ $ns }}"
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}"}[15m]) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "Le pod {{ "{{" }} $labels.pod {{ "}}" }} redémarre en boucle"
+{{- end }}

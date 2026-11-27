@@ -1,0 +1,53 @@
+# Flux autorisés vers les composants applicatifs (le reste est bloqué par la politique
+# deny-all posée par Terraform sur le namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-allow
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: frontend }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingressNamespace }} }
+      ports:
+        - { port: 8080, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: backend }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingressNamespace }} }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.monitoringNamespace }} }
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: frontend }
+      ports:
+        - { port: 3000, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-allow
+  labels: {{- include "library.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: worker }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.monitoringNamespace }} }
+      ports:
+        - { port: 9100, protocol: TCP }
