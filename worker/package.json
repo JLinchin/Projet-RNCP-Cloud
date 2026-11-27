@@ -15,7 +15,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1178.0",
     "amqplib": "^0.10.4",
-    "pdfkit": "^0.17.1",
+    "pdfkit": "^0.21.0",
     "pg": "^8.16.0",
     "pino": "^9.7.0",
     "prom-client": "^15.1.3"
