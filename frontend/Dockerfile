@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ---------- Étape 1 : build Vite (outillage Node non embarqué dans l'image finale) ----------
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
